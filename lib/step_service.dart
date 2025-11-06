@@ -16,7 +16,11 @@ class StepService {
     bool granted = await _health.requestAuthorization(types);
     if (!granted) return 0;
 
-    final data = await _health.getHealthDataFromTypes(start, now, types);
+    final data = await _health.getHealthDataFromTypes(
+      startTime: start,
+      endTime: now,
+      types: types,
+    );
 
     int totalSteps = 0;
     for (var item in data) {

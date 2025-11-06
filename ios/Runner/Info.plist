@@ -59,10 +59,10 @@
         <key>NSPhotoLibraryUsageDescription</key>
         <string>This app needs photos access to get QR code from photo library</string>
 		<key>UIStatusBarHidden</key>
+		<false/>
 		<key>NSHealthShareUsageDescription</key>
         <string>App 需要讀取您的健康步數資料以顯示今日步數</string>
         <key>NSHealthUpdateUsageDescription</key>
         <string>App 需要更新健康資料（若使用）</string>
-		<false/>
 	</dict>
 </plist>
