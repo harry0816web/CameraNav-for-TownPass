@@ -21,6 +21,8 @@ import 'package:town_pass/page/main/main_view.dart';
 import 'package:town_pass/page/main/main_view_controller.dart';
 import 'package:town_pass/page/message/message_view.dart';
 import 'package:town_pass/page/message/message_view_controller.dart';
+import 'package:town_pass/page/map/map_view.dart';
+import 'package:town_pass/page/map/map_view_controller.dart';
 import 'package:town_pass/page/message_detail/message_detail_view.dart';
 import 'package:town_pass/page/online_police/online_police_view.dart';
 import 'package:town_pass/page/phone_call_user_agreement/phone_call_user_agreement_view.dart';
@@ -59,6 +61,7 @@ abstract class TPRoute {
   static const String subscription = '/subscription';
   static const String suspendAccount = '/suspend_account';
   static const String webView = '/web_view';
+  static const String map = '/map';
 
   static final List<GetPage> page = [
     GetPage(
@@ -184,6 +187,13 @@ abstract class TPRoute {
     GetPage(
       name: activityDetail,
       page: () => const ActivityDetailView(),
+    ),
+    GetPage(
+      name: map,
+      page: () => const MapView(),
+      binding: BindingsBuilder(() {
+        Get.put<MapViewController>(MapViewController());
+      }),
     ),
   ];
 
