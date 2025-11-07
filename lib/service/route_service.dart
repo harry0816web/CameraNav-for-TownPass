@@ -34,10 +34,13 @@ class RouteEdge {
     required this.coveredByCameras,
   });
 
-  /// 計算加權成本
-  double get weightedCost {
+  /// 依據安全偏好計算加權成本
+  double cost(double safetyPreference) {
     final baseCost = travelTime ?? length;
-    return baseCost * securityCostFactor;
+    final clampedPreference = safetyPreference.clamp(0.0, 1.0);
+    final clampedSecurity = securityCostFactor.clamp(0.1, 1.0);
+    final combinedFactor = (1 - clampedPreference) + clampedPreference * clampedSecurity;
+    return baseCost * combinedFactor;
   }
 }
 
@@ -201,7 +204,11 @@ class RouteService extends GetxService {
   (LatLng?, LatLng?) get lastNearestNodes => (_lastNearestStart, _lastNearestEnd);
 
   /// 使用 Dijkstra 算法規劃最短路徑（考慮安全權重）
-  RouteResult? planRoute(LatLng start, LatLng end) {
+  RouteResult? planRoute(
+    LatLng start,
+    LatLng end, {
+    double safetyPreference = 1.0,
+  }) {
     if (_graph == null) {
       return null;
     }
@@ -262,7 +269,7 @@ class RouteService extends GetxService {
           continue;
         }
 
-        final alt = distances[currentNodeId]! + edge.weightedCost;
+        final alt = distances[currentNodeId]! + edge.cost(safetyPreference);
         if (alt < distances[edge.toNodeId]!) {
           distances[edge.toNodeId] = alt;
           previous[edge.toNodeId] = currentNodeId;
@@ -302,7 +309,7 @@ class RouteService extends GetxService {
         orElse: () => neighbors.first,
       );
 
-      totalCost += edge.weightedCost;
+      totalCost += edge.cost(safetyPreference);
       totalDistance += edge.length;
       totalSegments++;
       if (edge.securityCostFactor < 1.0) {
