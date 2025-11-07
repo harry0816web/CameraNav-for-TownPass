@@ -8,27 +8,34 @@ class StepService {
 
   // 取得今天 00:00 到現在的步數
   Future<int> getTodaySteps() async {
-    final now = DateTime.now();
-    final start = DateTime(now.year, now.month, now.day);
+  final now = DateTime.now();
+  final start = DateTime(now.year, now.month, now.day);
 
-    final types = [HealthDataType.STEPS];
+  final types = [HealthDataType.STEPS];
 
-    bool granted = await _health.requestAuthorization(types);
-    if (!granted) return 0;
+  final permissions = types.map((e) => HealthDataAccess.READ).toList();
 
-    final data = await _health.getHealthDataFromTypes(
-      startTime: start,
-      endTime: now,
-      types: types,
-    );
+  bool granted = await _health.requestAuthorization(types, permissions: permissions);
+  if (!granted) return 0;
 
-    int totalSteps = 0;
-    for (var item in data) {
-      totalSteps += (item.value as num).toInt();
+  final data = await _health.getHealthDataFromTypes(
+    startTime: start,
+    endTime: now,
+    types: types,
+  );
+
+  int totalSteps = 0;
+
+  for (var item in data) {
+    final value = item.value;
+    if (value is NumericHealthValue) {
+      totalSteps += value.numericValue?.toInt() ?? 0;
     }
-
-    return totalSteps;
   }
+
+  return totalSteps;
+}
+
 
   // 即時步數 Stream （pedometer）
   Stream<StepCount> getStepStream() {
