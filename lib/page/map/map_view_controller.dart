@@ -421,7 +421,7 @@ class MapViewController extends GetxController {
 
     isPlanningRoute.value = true;
     try {
-      final result = _routeService.planRoute(
+      final result = await _routeService.planRoute(
         _lastPlannedStart!,
         _lastPlannedEnd!,
         safetyPreference: safetyPreference.value,
@@ -479,7 +479,7 @@ class MapViewController extends GetxController {
     _lastPlannedEnd = end;
 
     try {
-      final result = _routeService.planRoute(
+      final result = await _routeService.planRoute(
         start,
         end,
         safetyPreference: safetyPreference.value,
@@ -585,15 +585,16 @@ class MapViewController extends GetxController {
         final lng = double.tryParse(parts[1].trim());
         if (lat != null && lng != null) {
           setInitialPosition(LatLng(lat, lng));
-          initialAddressTextController.clear();
+          initialAddressTextController.text = address;
           isSearchingAddress.value = false;
           return;
         }
       }
 
       // 使用 OpenStreetMap Nominatim API 進行地址解析
+      // 限制搜尋範圍在台灣（viewbox: 經度,緯度,經度,緯度）
       final encodedAddress = Uri.encodeComponent(address);
-      final url = 'https://nominatim.openstreetmap.org/search?q=$encodedAddress&format=json&limit=1&addressdetails=1';
+      final url = 'https://nominatim.openstreetmap.org/search?q=$encodedAddress&format=json&limit=5&addressdetails=1&viewbox=119.0,21.0,122.0,26.0&bounded=1&countrycodes=tw';
       
       final client = HttpClient();
       try {
@@ -610,7 +611,9 @@ class MapViewController extends GetxController {
             final lat = double.parse(result['lat'] as String);
             final lon = double.parse(result['lon'] as String);
             setInitialPosition(LatLng(lat, lon));
-            initialAddressTextController.clear();
+            // 保留搜尋結果的名稱在搜尋框內
+            final displayName = result['display_name'] as String? ?? address;
+            initialAddressTextController.text = displayName;
           } else {
             routeError.value = '找不到該地址，請確認地址是否正確';
           }
@@ -640,15 +643,16 @@ class MapViewController extends GetxController {
         final lng = double.tryParse(parts[1].trim());
         if (lat != null && lng != null) {
           setHomePosition(LatLng(lat, lng));
-          addressTextController.clear();
+          addressTextController.text = address;
           isSearchingAddress.value = false;
           return;
         }
       }
 
       // 使用 OpenStreetMap Nominatim API 進行地址解析
+      // 限制搜尋範圍在台灣（viewbox: 經度,緯度,經度,緯度）
       final encodedAddress = Uri.encodeComponent(address);
-      final url = 'https://nominatim.openstreetmap.org/search?q=$encodedAddress&format=json&limit=1&addressdetails=1';
+      final url = 'https://nominatim.openstreetmap.org/search?q=$encodedAddress&format=json&limit=5&addressdetails=1&viewbox=119.0,21.0,122.0,26.0&bounded=1&countrycodes=tw';
       
       final client = HttpClient();
       try {
@@ -665,7 +669,9 @@ class MapViewController extends GetxController {
             final lat = double.parse(result['lat'] as String);
             final lon = double.parse(result['lon'] as String);
             setHomePosition(LatLng(lat, lon));
-            addressTextController.clear();
+            // 保留搜尋結果的名稱在搜尋框內
+            final displayName = result['display_name'] as String? ?? address;
+            addressTextController.text = displayName;
           } else {
             routeError.value = '找不到該地址，請確認地址是否正確';
           }

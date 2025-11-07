@@ -1,3 +1,5 @@
+import 'dart:convert';
+import 'dart:io';
 import 'package:get/get.dart';
 import 'package:latlong2/latlong.dart';
 
@@ -35,11 +37,31 @@ class RouteEdge {
   });
 
   /// 依據安全偏好計算加權成本
+  /// 在權重偏低時使用極端非線性函數，最低時完全不考慮監視器權重
   double cost(double safetyPreference) {
     final baseCost = travelTime ?? length;
     final clampedPreference = safetyPreference.clamp(0.0, 1.0);
     final clampedSecurity = securityCostFactor.clamp(0.1, 1.0);
-    final combinedFactor = (1 - clampedPreference) + clampedPreference * clampedSecurity;
+    
+    // 當 preference = 0 時，完全不考慮安全權重（factor = 1.0）
+    if (clampedPreference <= 0.0) {
+      return baseCost;
+    }
+    
+    // 在權重偏低時使用極端非線性函數（4次方），讓低權重時幾乎不考慮安全
+    // 當 preference = 0.1 時，factor ≈ 0.9999（幾乎不考慮安全）
+    // 當 preference = 0.3 時，factor ≈ 0.9919（幾乎不考慮安全）
+    // 當 preference >= 0.5 時，使用較溫和的非線性（平方）
+    double effectivePreference;
+    if (clampedPreference < 0.5) {
+      // 低權重時使用4次方，極端偏向距離
+      effectivePreference = clampedPreference * clampedPreference * clampedPreference * clampedPreference;
+    } else {
+      // 高權重時使用平方，正常考慮安全
+      effectivePreference = clampedPreference * clampedPreference;
+    }
+    
+    final combinedFactor = (1 - effectivePreference) + effectivePreference * clampedSecurity;
     return baseCost * combinedFactor;
   }
 }
@@ -196,134 +218,249 @@ class RouteService extends GetxService {
       LatLng(maxLat, maxLng),
     );
     // 基於對角線長度粗略估算：城市級圖形給出較大半徑；加上下限/上限
-    final est = diag / 200; // 對角的1/200作為搜索半徑
-    return est.clamp(500, 5000);
+    // 增加搜尋半徑以提高節點匹配準確性
+    final est = diag / 150; // 對角的1/150作為搜索半徑（從1/200增加）
+    return est.clamp(1000, 10000); // 提高下限和上限
   }
 
   /// 取得上次匹配的最近節點（起/終點）
   (LatLng?, LatLng?) get lastNearestNodes => (_lastNearestStart, _lastNearestEnd);
 
-  /// 使用 Dijkstra 算法規劃最短路徑（考慮安全權重）
-  RouteResult? planRoute(
+  /// 評估路徑的監視器覆蓋情況
+  /// 返回 (安全路段數, 總路段數, 加權成本)
+  (int, int, double) _evaluatePathSafety(
+    List<LatLng> path,
+    double safetyPreference,
+  ) {
+    if (_graph == null || path.length < 2) {
+      return (0, 0, 0.0);
+    }
+
+    int safeSegments = 0;
+    int totalSegments = 0;
+    double totalWeightedCost = 0.0;
+    final distance = const Distance();
+
+    for (int i = 0; i < path.length - 1; i++) {
+      final segmentStart = path[i];
+      final segmentEnd = path[i + 1];
+      final segmentLength = distance.as(
+        LengthUnit.Meter,
+        segmentStart,
+        segmentEnd,
+      );
+
+      // 找到路段中點附近的路網邊緣
+      final midPoint = LatLng(
+        (segmentStart.latitude + segmentEnd.latitude) / 2,
+        (segmentStart.longitude + segmentEnd.longitude) / 2,
+      );
+
+      // 搜尋附近的路網節點
+      final radius = 50.0; // 50 公尺搜尋半徑
+      final nearestNodeId = _graph!.findNearestNode(midPoint, maxDistanceMeters: radius);
+
+      if (nearestNodeId != null) {
+        // 找到該節點的鄰接邊緣，選擇最接近路段的邊緣
+        final neighbors = _graph!.getNeighbors(nearestNodeId);
+        RouteEdge? bestEdge;
+        double minDistance = double.infinity;
+
+        for (final edge in neighbors) {
+          final toNode = _graph!.nodes[edge.toNodeId];
+          if (toNode != null) {
+            final edgeMidPoint = LatLng(
+              (midPoint.latitude + toNode.latitude) / 2,
+              (midPoint.longitude + toNode.longitude) / 2,
+            );
+            final dist = distance.as(LengthUnit.Meter, midPoint, edgeMidPoint);
+            if (dist < minDistance) {
+              minDistance = dist;
+              bestEdge = edge;
+            }
+          }
+        }
+
+        if (bestEdge != null) {
+          totalSegments++;
+          if (bestEdge.securityCostFactor < 1.0) {
+            safeSegments++;
+          }
+          // 計算加權成本
+          final baseCost = bestEdge.travelTime ?? segmentLength;
+          final clampedPreference = safetyPreference.clamp(0.0, 1.0);
+          final clampedSecurity = bestEdge.securityCostFactor.clamp(0.1, 1.0);
+          
+          double effectivePreference;
+          if (clampedPreference < 0.5) {
+            effectivePreference = clampedPreference *
+                clampedPreference *
+                clampedPreference *
+                clampedPreference;
+          } else {
+            effectivePreference = clampedPreference * clampedPreference;
+          }
+          
+          final combinedFactor = (1 - effectivePreference) + effectivePreference * clampedSecurity;
+          totalWeightedCost += baseCost * combinedFactor;
+        } else {
+          // 如果找不到匹配的邊緣，使用原始距離
+          totalSegments++;
+          totalWeightedCost += segmentLength;
+        }
+      } else {
+        // 如果找不到附近節點，使用原始距離
+        totalSegments++;
+        totalWeightedCost += segmentLength;
+      }
+    }
+
+    return (safeSegments, totalSegments, totalWeightedCost);
+  }
+
+  /// 使用 OSRM API 規劃路徑（支援監視器權重評估）
+  Future<RouteResult?> planRouteWithOSRM(
+    LatLng start,
+    LatLng end, {
+    double safetyPreference = 0.0,
+  }) async {
+    try {
+      // 使用 OSRM 的公開 API（免費，但有限制）
+      // 格式：{lon1},{lat1};{lon2},{lat2}
+      // 總是獲取多條候選路徑以評估監視器覆蓋（即使權重為 0，也獲取多條路徑以選擇最短的）
+      final alternatives = 3; // 獲取最多 3 條候選路徑
+      final url = 'http://router.project-osrm.org/route/v1/driving/'
+          '${start.longitude},${start.latitude};${end.longitude},${end.latitude}'
+          '?overview=full&geometries=geojson&alternatives=$alternatives';
+      
+      final client = HttpClient();
+      try {
+        final request = await client.getUrl(Uri.parse(url));
+        request.headers.add('User-Agent', 'TownPass/1.0');
+        final response = await request.close();
+
+        if (response.statusCode == 200) {
+          final responseBody = await response.transform(utf8.decoder).join();
+          final Map<String, dynamic> data = jsonDecode(responseBody);
+
+          if (data['code'] == 'Ok' && data['routes'] != null && (data['routes'] as List).isNotEmpty) {
+            final routes = (data['routes'] as List<dynamic>).cast<Map<String, dynamic>>();
+            
+            // 評估所有候選路徑並選擇最佳
+            // 如果有路網數據，評估監視器覆蓋；否則選擇最短距離
+            RouteResult? bestResult;
+            double bestScore = double.infinity;
+
+            for (final route in routes) {
+              final geometry = route['geometry'] as Map<String, dynamic>;
+              final coordinates = geometry['coordinates'] as List<dynamic>;
+              
+              // 轉換 GeoJSON 座標格式 [lon, lat] 為 LatLng
+              final path = coordinates
+                  .map((coord) {
+                    final coordList = coord as List<dynamic>;
+                    return LatLng(
+                      coordList[1] as double, // lat
+                      coordList[0] as double, // lon
+                    );
+                  })
+        .toList();
+
+              final distance = (route['distance'] as num).toDouble();
+              final duration = (route['duration'] as num).toDouble();
+
+    int safeSegments = 0;
+    int totalSegments = 0;
+              double score;
+
+              // 如果有路網數據，評估監視器覆蓋
+              if (_graph != null) {
+                final (safe, total, weightedCost) =
+                    _evaluatePathSafety(path, safetyPreference);
+                safeSegments = safe;
+                totalSegments = total;
+                // 當權重為 0 時，使用距離作為分數；否則使用加權成本
+                score = safetyPreference <= 0.0 ? distance : weightedCost;
+              } else {
+                // 沒有路網數據時，使用距離作為分數
+                totalSegments = (distance / 50).ceil().clamp(1, 1000);
+                score = distance;
+              }
+
+              // ignore: avoid_print
+              print('[RouteService] OSRM route candidate:');
+              // ignore: avoid_print
+              print('  Distance: ${distance.toStringAsFixed(1)}m');
+              // ignore: avoid_print
+              print('  Duration: ${duration.toStringAsFixed(1)}s');
+              if (_graph != null && totalSegments > 0) {
+                // ignore: avoid_print
+                print('  Safe segments: $safeSegments/$totalSegments');
+              }
+              // ignore: avoid_print
+              print('  Score: ${score.toStringAsFixed(2)}');
+
+              if (score < bestScore) {
+                bestScore = score;
+                bestResult = RouteResult(
+                  path: path,
+                  totalCost: _graph != null && safetyPreference > 0.0
+                      ? score
+                      : duration,
+                  totalDistance: distance,
+                  safeSegments: safeSegments,
+                  totalSegments: totalSegments > 0
+                      ? totalSegments
+                      : (distance / 50).ceil().clamp(1, 1000),
+                );
+              }
+            }
+
+            if (bestResult != null) {
+              // ignore: avoid_print
+              print('[RouteService] Selected best OSRM route with score: ${bestScore.toStringAsFixed(2)}');
+              return bestResult;
+            }
+
+            // 如果沒有找到最佳路徑（不應該發生），返回 null
+            // ignore: avoid_print
+            print('[RouteService] Failed to select best route from candidates');
+            return null;
+          } else {
+            // ignore: avoid_print
+            print('[RouteService] OSRM returned no route: ${data['code']}');
+            return null;
+          }
+        } else {
+          // ignore: avoid_print
+          print('[RouteService] OSRM API error: ${response.statusCode}');
+          return null;
+        }
+      } finally {
+        client.close();
+      }
+    } catch (e) {
+      // ignore: avoid_print
+      print('[RouteService] OSRM API exception: $e');
+      return null;
+    }
+  }
+
+  /// 使用 OSRM API 規劃路徑並評估監視器權重
+  /// 所有權重值都使用 OSRM API 作為基礎，確保路徑正確
+  Future<RouteResult?> planRoute(
     LatLng start,
     LatLng end, {
     double safetyPreference = 1.0,
-  }) {
-    if (_graph == null) {
-      return null;
-    }
-
-    final radius = _configuredSearchRadiusMeters ?? _adaptiveSearchRadiusMeters();
-    final startNodeId = _graph!.findNearestNode(start, maxDistanceMeters: radius);
-    final endNodeId = _graph!.findNearestNode(end, maxDistanceMeters: radius);
-
-    if (startNodeId == null || endNodeId == null) {
-      return null;
-    }
-
-    // 保存 debug 最近節點座標
-    _lastNearestStart = _graph!.nodes[startNodeId]?.latLng;
-    _lastNearestEnd = _graph!.nodes[endNodeId]?.latLng;
-
-    // Dijkstra 算法
-    final distances = <String, double>{};
-    final previous = <String, String?>{};
-    final unvisited = <String>{};
-    final visited = <String>{};
-
-    // 初始化
-    for (final nodeId in _graph!.nodes.keys) {
-      distances[nodeId] = double.infinity;
-      previous[nodeId] = null;
-      unvisited.add(nodeId);
-    }
-    distances[startNodeId] = 0.0;
-
-    // 主循環
-    while (unvisited.isNotEmpty) {
-      // 找到未訪問節點中距離最小的
-      String? currentNodeId;
-      double minDistance = double.infinity;
-      for (final nodeId in unvisited) {
-        if (distances[nodeId]! < minDistance) {
-          minDistance = distances[nodeId]!;
-          currentNodeId = nodeId;
-        }
-      }
-
-      if (currentNodeId == null || minDistance == double.infinity) {
-        break; // 無法到達終點
-      }
-
-      if (currentNodeId == endNodeId) {
-        break; // 已到達終點
-      }
-
-      unvisited.remove(currentNodeId);
-      visited.add(currentNodeId);
-
-      // 更新鄰接節點的距離
-      final neighbors = _graph!.getNeighbors(currentNodeId);
-      for (final edge in neighbors) {
-        if (visited.contains(edge.toNodeId)) {
-          continue;
-        }
-
-        final alt = distances[currentNodeId]! + edge.cost(safetyPreference);
-        if (alt < distances[edge.toNodeId]!) {
-          distances[edge.toNodeId] = alt;
-          previous[edge.toNodeId] = currentNodeId;
-        }
-      }
-    }
-
-    // 重建路徑
-    if (distances[endNodeId] == double.infinity) {
-      return null; // 無法找到路徑
-    }
-
-    final pathNodeIds = <String>[];
-    String? current = endNodeId;
-    while (current != null) {
-      pathNodeIds.insert(0, current);
-      current = previous[current];
-    }
-
-    // 轉換為座標點列表
-    final path = pathNodeIds
-        .map((id) => _graph!.nodes[id]!.latLng)
-        .toList();
-
-    // 計算統計資訊
-    double totalCost = 0.0;
-    double totalDistance = 0.0;
-    int safeSegments = 0;
-    int totalSegments = 0;
-
-    for (int i = 0; i < pathNodeIds.length - 1; i++) {
-      final fromId = pathNodeIds[i];
-      final toId = pathNodeIds[i + 1];
-      final neighbors = _graph!.getNeighbors(fromId);
-      final edge = neighbors.firstWhere(
-        (e) => e.toNodeId == toId,
-        orElse: () => neighbors.first,
-      );
-
-      totalCost += edge.cost(safetyPreference);
-      totalDistance += edge.length;
-      totalSegments++;
-      if (edge.securityCostFactor < 1.0) {
-        safeSegments++;
-      }
-    }
-
-    return RouteResult(
-      path: path,
-      totalCost: totalCost,
-      totalDistance: totalDistance,
-      safeSegments: safeSegments,
-      totalSegments: totalSegments,
-    );
+  }) async {
+    // 所有權重值都使用 OSRM API 作為基礎，確保路徑正確
+    // 然後根據監視器權重評估並選擇最佳路徑
+    // ignore: avoid_print
+    print('[RouteService] Using OSRM API with safety preference: $safetyPreference');
+    // 設置最近節點為實際起點和終點（OSRM 不需要匹配節點）
+    _lastNearestStart = start;
+    _lastNearestEnd = end;
+    return await planRouteWithOSRM(start, end, safetyPreference: safetyPreference);
   }
 
   /// 檢查圖形是否已載入
