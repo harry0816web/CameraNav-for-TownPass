@@ -37,6 +37,26 @@ class GeoLocatorService extends GetxService {
 
     // When we reach here, permissions are granted and we can
     // continue accessing the position of the device.
-    return await Geolocator.getCurrentPosition();
+    // 使用較高的精度設定以獲得更好的定位準確性
+    // 強制使用GPS定位，避免使用網絡定位（可能不準確）
+    return await Geolocator.getCurrentPosition(
+      desiredAccuracy: LocationAccuracy.high,
+      timeLimit: const Duration(seconds: 15),
+      forceAndroidLocationManager: false, // 使用新的Fused Location Provider
+    );
+  }
+
+  /// 檢查位置是否在台灣範圍內
+  /// 台灣大致範圍：緯度 21.9-25.3, 經度 119.3-122.0
+  static bool isLocationInTaiwan(double latitude, double longitude) {
+    const double taiwanMinLat = 21.9;
+    const double taiwanMaxLat = 25.3;
+    const double taiwanMinLng = 119.3;
+    const double taiwanMaxLng = 122.0;
+    
+    return latitude >= taiwanMinLat && 
+           latitude <= taiwanMaxLat && 
+           longitude >= taiwanMinLng && 
+           longitude <= taiwanMaxLng;
   }
 }

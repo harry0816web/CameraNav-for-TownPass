@@ -278,10 +278,10 @@ class MapViewController extends GetxController {
   void _updateRouteCameraLocations(List<LatLng> path) {
     routeCameraLocations.clear();
     if (path.length < 2 || cameraLocations.isEmpty) {
-      if (cameraDisplayMode.value == CameraDisplayMode.route) {
-        cameraDisplayMode.value = CameraDisplayMode.all;
-      }
-      _refreshCameraDisplayItems();
+      // 如果路徑無效或沒有監視器數據，清空路徑監視器列表
+      // 模式切換由調用者（_applyRouteResult）處理
+      // ignore: avoid_print
+      print('[MapViewController] 路徑無效或沒有監視器數據，清空路徑監視器');
       return;
     }
 
@@ -327,10 +327,38 @@ class MapViewController extends GetxController {
       }
     }
 
-    if (cameraDisplayMode.value == CameraDisplayMode.route && routeCameraLocations.isEmpty) {
-      cameraDisplayMode.value = CameraDisplayMode.all;
+    // 注意：不在這裡自動切換模式，由調用者（_applyRouteResult）決定
+    // 如果路徑上沒有監視器，保持當前模式不變
+    // ignore: avoid_print
+    print('[MapViewController] 路徑上的監視器數量: ${routeCameraLocations.length}');
+  }
+
+  /// 計算25vw對應的地理距離（公尺）
+  /// 基於當前地圖可見寬度的25%
+  double? _calculate25vwRadiusMeters() {
+    try {
+      final bounds = mapController.camera.visibleBounds;
+
+      // 計算可見區域的寬度（公尺）
+      // 使用中心緯度計算東西方向距離
+      final centerLat = (bounds.north + bounds.south) / 2;
+      
+      // 計算東西方向的距離（取左中點到右中點）
+      final leftCenter = LatLng(centerLat, bounds.west);
+      final rightCenter = LatLng(centerLat, bounds.east);
+      final distance = const Distance();
+      final viewportWidthMeters = distance.as(
+        LengthUnit.Meter,
+        leftCenter,
+        rightCenter,
+      );
+
+      // 25vw = 可見寬度的25%
+      final radius25vw = viewportWidthMeters * 0.25;
+      return radius25vw;
+    } catch (_) {
+      return null;
     }
-    _refreshCameraDisplayItems();
   }
 
   void _refreshCameraDisplayItems() {
@@ -339,21 +367,42 @@ class MapViewController extends GetxController {
       cameraDisplayItems.clear();
       return;
     }
-    LatLngBounds? bounds;
-    try {
-      bounds = mapController.camera.visibleBounds;
-    } catch (_) {
-      bounds = null;
+
+    // 如果是路徑模式，顯示所有路徑上的監視器（不進行25vw過濾）
+    if (cameraDisplayMode.value == CameraDisplayMode.route) {
+      final clusters = _clusterCameraLocations(allSource, mapZoom.value);
+      cameraDisplayItems.assignAll(clusters);
+      return;
     }
-    final filtered = bounds == null
-        ? List<CameraLocation>.from(allSource)
-        : allSource
-            .where((camera) => bounds!.contains(camera.position))
-            .toList(growable: false);
 
-    final source = filtered.isEmpty ? allSource : filtered;
+    // 非路徑模式：根據25vw半徑過濾監視器
+    // 計算25vw半徑（公尺）
+    final radius25vw = _calculate25vwRadiusMeters();
+    
+    // 如果無法計算半徑，回退到顯示所有監視器
+    if (radius25vw == null) {
+      final clusters = _clusterCameraLocations(allSource, mapZoom.value);
+      cameraDisplayItems.assignAll(clusters);
+      return;
+    }
 
-    final clusters = _clusterCameraLocations(source, mapZoom.value);
+    // 獲取地圖中心點
+    final center = mapCenter.value;
+    final distance = const Distance();
+
+    // 過濾出在地圖中心25vw半徑圓內的監視器
+    final filtered = allSource
+        .where((camera) {
+          final dist = distance.as(
+            LengthUnit.Meter,
+            center,
+            camera.position,
+          );
+          return dist <= radius25vw;
+        })
+        .toList(growable: false);
+
+    final clusters = _clusterCameraLocations(filtered, mapZoom.value);
     cameraDisplayItems.assignAll(clusters);
   }
 
@@ -460,6 +509,21 @@ class MapViewController extends GetxController {
       ..clear()
       ..addAll([if (s != null) s, if (e != null) e]);
     _updateRouteCameraLocations(result.path);
+    
+    // 路徑規劃完成後，自動切換到只顯示路徑上的監視器
+    if (routeCameraLocations.isNotEmpty) {
+      cameraDisplayMode.value = CameraDisplayMode.route;
+      // ignore: avoid_print
+      print('[MapViewController] 路徑規劃完成，切換到路徑模式，顯示 ${routeCameraLocations.length} 個路徑上的監視器');
+    } else {
+      // 如果路徑上沒有監視器，保持或切換到全部模式
+      if (cameraDisplayMode.value == CameraDisplayMode.route) {
+        cameraDisplayMode.value = CameraDisplayMode.all;
+        // ignore: avoid_print
+        print('[MapViewController] 路徑上沒有監視器，切換到全部模式');
+      }
+    }
+    
     _refreshCameraDisplayItems();
   }
 
@@ -523,21 +587,98 @@ class MapViewController extends GetxController {
     locationError.value = null;
     try {
       final position = await _geoLocatorService.position();
-      currentPosition.value = LatLng(position.latitude, position.longitude);
-      mapCenter.value = currentPosition.value!;
+      final location = LatLng(position.latitude, position.longitude);
+      
+      // 檢查位置是否在台灣範圍內
+      final isInTaiwan = GeoLocatorService.isLocationInTaiwan(
+        location.latitude,
+        location.longitude,
+      );
+      
+      // 檢查精度（accuracy），如果精度太差（>1000米），可能不準確
+      final accuracy = position.accuracy;
+      final isAccurate = accuracy > 0 && accuracy < 1000;
+      
+      // 詳細日誌輸出
+      // ignore: avoid_print
+      print('[MapViewController] 定位結果:');
+      // ignore: avoid_print
+      print('  位置: lat=${location.latitude}, lng=${location.longitude}');
+      // ignore: avoid_print
+      print('  精度: ${accuracy.toStringAsFixed(1)} 公尺');
+      // ignore: avoid_print
+      print('  是否在台灣範圍: $isInTaiwan');
+      // ignore: avoid_print
+      print('  精度是否可接受: $isAccurate');
+      // ignore: avoid_print
+      print('  時間戳: ${position.timestamp}');
+      
+      // 如果位置不在台灣範圍內，可能是模擬器預設位置（如舊金山）
+      if (!isInTaiwan) {
+        final errorMsg = '定位位置不在台灣範圍內\n'
+            '位置: (${location.latitude.toStringAsFixed(4)}, ${location.longitude.toStringAsFixed(4)})\n'
+            '這可能是模擬器的預設位置。\n\n'
+            '解決方法：\n'
+            '1. iOS模擬器：Features > Location > Custom Location\n'
+            '2. Android模擬器：Extended Controls > Location\n'
+            '3. 設置為台灣的座標（例如：25.0330, 121.5654）';
+        locationError.value = errorMsg;
+        // ignore: avoid_print
+        print('[MapViewController] 警告：定位位置不在台灣範圍內，可能是模擬器預設位置');
+        // 不移動地圖到錯誤位置，保持當前地圖位置
+        currentPosition.value = null;
+        return;
+      }
+      
+      // 如果精度太差，警告用戶但仍然使用該位置
+      if (!isAccurate) {
+        // ignore: avoid_print
+        print('[MapViewController] 警告：定位精度較差 (${accuracy.toStringAsFixed(1)} 公尺)');
+      }
+      
+      currentPosition.value = location;
+      
+      // 移動地圖中心到定位座標
+      mapCenter.value = location;
+      _lastCameraCenter = location;
+      
+      // 實際移動地圖控制器到定位位置
+      // 使用合適的縮放級別（如果當前縮放太小，則設置為較大的縮放級別以便查看周圍）
+      final targetZoom = mapZoom.value < 15.0 ? 15.0 : mapZoom.value;
+      mapZoom.value = targetZoom;
+      mapController.move(location, targetZoom);
+      
+      // 觸發監視器顯示更新
+      _refreshCameraDisplayItems();
+      
       locationError.value = null; // 清除錯誤訊息
+      
+      // ignore: avoid_print
+      print('[MapViewController] 定位成功並已移動地圖');
     } catch (error) {
       // 如果無法取得位置，保持預設的台北市位置
       final errorMessage = error.toString();
-      print('無法取得當前位置: $errorMessage');
+      // ignore: avoid_print
+      print('[MapViewController] 無法取得當前位置: $errorMessage');
       
       // 設置友好的錯誤訊息
       if (errorMessage.contains('未開啟定位服務')) {
-        locationError.value = '定位服務未開啟\n請在模擬器中設置模擬位置：\nFeatures > Location > Custom Location';
+        locationError.value = '定位服務未開啟\n\n'
+            'iOS模擬器：\n'
+            'Features > Location > Custom Location\n'
+            '設置為：25.0330, 121.5654\n\n'
+            'Android模擬器：\n'
+            'Extended Controls > Location\n'
+            '設置為：25.0330, 121.5654';
       } else if (errorMessage.contains('未允許定位權限')) {
         locationError.value = '定位權限未允許\n請在設置中允許定位權限';
+      } else if (errorMessage.contains('timeout') || errorMessage.contains('time limit')) {
+        locationError.value = '定位超時\n請確認定位服務已開啟，或稍後再試';
       } else {
-        locationError.value = '無法取得位置：$errorMessage\n\n模擬器用戶：請設置模擬位置\nFeatures > Location > Custom Location';
+        locationError.value = '無法取得位置：$errorMessage\n\n'
+            '模擬器用戶：\n'
+            '請設置模擬位置為台灣座標\n'
+            '例如：25.0330, 121.5654 (台北)';
       }
     } finally {
       isLoadingLocation.value = false;
@@ -757,18 +898,47 @@ class MapViewController extends GetxController {
     );
   }
 
-  // 規劃路徑（從初始位置到回家位置）
+  // 規劃路徑（從定位位置或初始位置到回家位置）
+  // 優先使用定位位置，如果沒有定位位置則使用用戶設定的初始位置
   Future<void> planRouteFromInitialToHome() async {
-    if (initialPosition.value == null) {
-      routeError.value = '請先設定初始位置';
-      return;
-    }
+    // 檢查回家位置
     if (homePosition.value == null) {
       routeError.value = '請先設定回家位置';
       return;
     }
+
+    // 優先使用定位位置
+    LatLng? startPosition;
+    if (currentPosition.value != null) {
+      startPosition = currentPosition.value;
+      // ignore: avoid_print
+      print('[MapViewController] 使用定位位置作為起點: ${startPosition!.latitude}, ${startPosition.longitude}');
+    } else if (initialPosition.value != null) {
+      startPosition = initialPosition.value;
+      // ignore: avoid_print
+      print('[MapViewController] 使用初始位置作為起點: ${startPosition!.latitude}, ${startPosition.longitude}');
+    } else {
+      // 如果都沒有，嘗試獲取定位位置
+      // ignore: avoid_print
+      print('[MapViewController] 沒有定位位置和初始位置，嘗試獲取定位...');
+      await _getCurrentLocation();
+      
+      if (currentPosition.value != null) {
+        startPosition = currentPosition.value;
+        // ignore: avoid_print
+        print('[MapViewController] 定位成功，使用定位位置作為起點');
+      } else if (initialPosition.value != null) {
+        startPosition = initialPosition.value;
+        // ignore: avoid_print
+        print('[MapViewController] 定位失敗，使用初始位置作為起點');
+      } else {
+        routeError.value = '無法取得定位位置，請先設定初始位置或確認定位權限已開啟';
+        return;
+      }
+    }
+
     await _executeRoutePlanning(
-      initialPosition.value!,
+      startPosition!,
       homePosition.value!,
       notFoundMessage: '無法找到路徑，請確認起終點位置是否在路網範圍內',
     );

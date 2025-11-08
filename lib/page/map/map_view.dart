@@ -602,7 +602,9 @@ class _CollapsedControls extends StatelessWidget {
       () {
         final bool isLocating = controller.isLoadingLocation.value;
         final bool isPlanning = controller.isPlanningRoute.value;
-        final bool canNavigate = controller.initialPosition.value != null &&
+        // 只要有定位位置或初始位置，以及回家位置，就可以導航
+        final bool canNavigate = (controller.currentPosition.value != null ||
+                controller.initialPosition.value != null) &&
             controller.homePosition.value != null;
 
         return Container(
