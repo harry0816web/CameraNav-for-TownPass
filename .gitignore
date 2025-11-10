@@ -89,3 +89,7 @@ app.*.map.json
 
 # FVM Version Cache
 .fvm/
+
+# Large data files
+assets/mock_data/taipei_with_security.json
+assets/mock_data/camera_map_geo_data.csv
